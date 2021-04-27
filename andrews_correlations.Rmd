@@ -1,0 +1,445 @@
+---
+title: "Andrew's Bacteria-Phage Correlations"
+author: "Rachel Rodgers"
+date: "4/8/2021"
+output: 
+  html_document:
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+  
+---
+
+```{r load-libraries, message=FALSE, warning=FALSE}
+library("pheatmap")
+library("psych")
+library("phyloseq")
+library("tidyverse")
+```
+
+Function definitions.
+
+```{r fxn-dfs}
+FillEmptyRanks <- function(physeqObj) {
+  # Function replaces missing values (NA) or values of "not classified"
+  #   in a phyloseq's tax_table with a more informative name, generally
+  #   "unclassified <previousTaxonomicRankName" or "unclassified" if no
+  #   previous rank is classified.
+  #
+  # Args:
+  #   physeqObj: An object of class Phyloseq
+  # Returns:
+  #   Phyloseq object with modified taxonomy table
+
+  # Extract taxonomy table from physeq object, convert any factor columns to character
+  taxTableOld <- as.data.frame(as(tax_table(physeqObj), "matrix"))
+  taxTableModified <- mutate(taxTableOld, across(where(is.factor), as.character))
+  
+  for (i in 1:nrow(taxTableModified)) {
+    
+    lastString <- "unclassified"
+    
+    for (j in 1:ncol(taxTableModified)) {
+      # value is not NA or "not classified", set lastString variable
+      if (!is.na(taxTableModified[i, j]) & taxTableModified[i, j] != "not classified") {
+        lastString <- taxTableModified[i, j]
+        # value is NA and is in column 1
+        } else if (is.na(taxTableModified[i, j]) & j == 1) {
+          taxTableModified[i, j] <- lastString
+        # value is NA and is in column 2+
+        } else if (is.na(taxTableModified[i, j]) & j > 1) {
+          taxTableModified[i, j] <- paste("unclassified", lastString)
+        # value is equal to "not classified"
+        } else if (taxTableModified[i, j] == "not classified") {
+          if (lastString == "not classified") {
+            taxTableModified[i, j] <- "unclassified"
+            } else {
+              taxTableModified[i, j] <- paste("unclassified", lastString) 
+            }
+        }
+    }
+  }
+
+  # Convert the new taxonomy table back into class tax_table, overwrite tax slot,
+  #   and assign to new phyloseq object
+  newTaxonomy <- as(taxTableModified, "matrix")
+  physeqModifiedTaxonomy <- physeqObj
+  
+  tax_table(physeqModifiedTaxonomy) <- tax_table(newTaxonomy)
+  return(physeqModifiedTaxonomy)
+  
+}
+
+PivotData <- function(df, rank) {
+  # Pivots melted phyloseq data frame into wide format
+  #
+  # Args:
+  #   df: Melted phyloseq data
+  #   rank: The taxonimc rank of interest
+  #
+  # Returns:
+  #   wide-formatted data frame from melted phyloseq data
+  dfModified <- df %>%
+    select(Sample, Abundance, !!sym(rank)) %>%
+    pivot_wider(names_from = all_of(rank), values_from = "Abundance") %>%
+    mutate(across(where(is.numeric), ~ replace(., is.na(.), 0)))
+}
+
+MakeCorrelationMatrix <- function(abdTable, bacteria, phage, sig_p = 0.05) {
+  # Generate a correlation matrix from an abundance data frame
+  #
+  # Args:
+  #   abdTable - data frame of abundance information (sample names are row names,
+  #   columns are taxa)
+  #   bacteria - vector of all bacteria names in current abd table
+  #   phage - vector of phage names in current abd table
+  # Returns:
+  #   correlation matrix
+  emptyCols <- colnames(abdTable)[colSums(abdTable) == 0]
+  keepBacteria <- bacteria[!bacteria %in% emptyCols]
+  keepPhage <- phage[!phage %in% emptyCols]
+  sigCorrMtx <- NA
+
+  #correlation <- cor(x = abdTable, method = "spearman")
+  correlation <- corr.test(x = abdTable, method = "spearman", adjust = "fdr")
+  
+  corrReduced <- correlation$r %>%
+    as.data.frame() %>% 
+    rownames_to_column(var = "row_taxa") %>%
+    filter(row_taxa %in% keepBacteria) %>% # only bacteria will be in the rows
+    dplyr::select(row_taxa, all_of(keepPhage)) # only phage will be in the columns
+  
+  corrMtx <- column_to_rownames(corrReduced, "row_taxa") 
+    
+  # correlation p-values (filtered)
+  corrPValReduced <- correlation$p %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "row_taxa") %>%
+    filter(row_taxa %in% keepBacteria) %>% # only bacteria will be in the rows
+    dplyr::select(row_taxa, all_of(keepPhage)) # only phage will be in the columns
+    
+  # pivot the correlations and p-values into a long data frame, use to generate
+  #   significant correlation matrix
+  corrPivot <- corrReduced %>% 
+    pivot_longer(cols = !row_taxa, names_to = "column_taxa", 
+                 values_to = "correlation") %>% 
+    unite(col = "comparison", row_taxa, column_taxa, sep = "-")
+  
+  pValPivotLUT <- corrPValReduced %>% 
+    pivot_longer(cols = !row_taxa, names_to = "column_taxa",
+                 values_to = "p_value") %>% 
+    unite(col = "comparison", row_taxa, column_taxa, sep = "-") %>% 
+    deframe()
+  
+  # Filter to just keep correlations that were significant, remaining non-sig
+  #   comparisons will fill with NA
+  sigCorrPivot <- corrPivot %>% 
+    mutate("p_value" = pValPivotLUT[comparison]) %>% 
+    filter(p_value <= sig_p)
+  
+  if (dim(sigCorrPivot)[1] != 0) { # if not empty
+    sigCorrMtx <- sigCorrPivot %>% 
+      separate(col = "comparison", into = c("row_taxa", "column_taxa"), sep = "-") %>% 
+      select(-p_value) %>% 
+      pivot_wider(names_from = column_taxa, values_from = correlation) %>% 
+      column_to_rownames(var = "row_taxa")
+  }
+  
+  #corrReduced <- correlation %>%
+    #as.data.frame() %>% 
+    #rownames_to_column(var = "row_taxa") %>%
+    #filter(row_taxa %in% keepBacteria) %>% # only bacteria will be in the rows
+    #dplyr::select(row_taxa, all_of(keepPhage)) # only phage will be in the columns
+  
+  correlationList <- list("correlation_matrix" = corrMtx,
+                          "sig_corraltion_matrix" = sigCorrMtx)
+  
+}
+
+PlotCorrelationHeatmap <- function(correlationMtx,  title = NULL) {
+  # Calls pheatmap on given correlationMtx.  Does not cluster rows or columns,
+  #  sets empty columns to grey color.
+  #
+  # Args:
+  #   correlationMtx - a correlation matrix
+  #   title - plot title
+  # Returns:
+  #   pheatmap graphic
+  correlationHeatmap <- pheatmap(correlationMtx, na_col = "grey", main = title,
+                                 cluster_rows = FALSE, cluster_cols = FALSE)
+}
+```
+
+Loading bacterial and phage phyloseq objects.  Changing taxonomic categories for phage from lower to upper-case for ease.
+
+```{r load-data, results='hide'}
+physeqBacteria <- readRDS("psm.DS1.RDS")
+sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
+physeqBacteria # 775 x 95
+
+physeqPhage <- readRDS("psm.DS1.phage.RDS") # currently contains phage + other stuff
+sampleDataPhage <- as(sample_data(physeqPhage), "data.frame")
+physeqPhage # 1135 x 84
+
+# Adjust the capitalization of the phage taxonomy table for ease (currently lower case)
+phageRanksOld <- colnames(tax_table(physeqPhage))
+phageRanksNew <- str_to_title(phageRanksOld)
+colnames(tax_table(physeqPhage)) <- phageRanksNew
+```
+
+Determine which samples are seroconversion Yes and No so heatmaps can be divided appropriately.
+
+```{r sample-seroconversion-status}
+# Since the bacteria and phage data have different numbers of samples, we need
+#   to make sure we identify all the samples in each seroconversion category
+
+bacteriaSero <- sampleDataBacteria %>% 
+  rownames_to_column(var = "sample_name") %>% 
+  select(sample_name, seroconversion) # 95 samples
+bacteriaSeroYes <- bacteriaSero %>% 
+  filter(seroconversion == "Yes") %>% 
+  pull(sample_name)
+bacteriaSeroNo <- bacteriaSero %>% 
+  filter(seroconversion == "No") %>% 
+  pull(sample_name)
+
+phageSero <- sampleDataPhage %>% 
+  rownames_to_column(var = "sample_name") %>% 
+  select(sample_name, seroconversion) # 84 samples
+phageSeroYes <- phageSero %>% 
+  filter(seroconversion == "Yes") %>% 
+  pull(sample_name)
+phageSeroNo <- phageSero %>% 
+  filter(seroconversion == "No") %>% 
+  pull(sample_name)
+
+# merge the samples from phage and bacteria
+seroYesSamples <- unique(c(bacteriaSeroYes, phageSeroYes)) # 37 samples
+seroNoSamples <- unique(c(bacteriaSeroNo, phageSeroNo)) # 63 samples
+```
+
+Phyloseq objects will be glommed at all taxonomic ranks.  Checking the number of missing taxonomic ranks (NA's) in these columns so uninformative names in the taxonomy table can be replaced.
+
+```{r checking-for-missing-taxonomic-names}
+ranks <- c("Order", "Family", "Genus")
+names(ranks) <- ranks
+
+taxTableBacteria <- as.data.frame(as(tax_table(physeqBacteria), "matrix"))
+numMissingBacterialRanks <- map_int(taxTableBacteria, ~ sum(is.na(.)))
+numMissingBacterialRanks[ranks] # 139 NAs in Genus column
+
+taxTablePhage <- as.data.frame(as(tax_table(physeqPhage), "matrix"))
+numMissingPhageRanks <- map_int(taxTablePhage, ~ sum(is.na(.)))
+numMissingPhageRanks[ranks] # 19 NAs in Order, 12 NAs in Family, 29 NAs in Genus
+```
+
+The bacterial data has 139 NA's in the Genus column.  The phage data has 19 NA's in Order, 12 NA's in Family, and 29 NA's in the Genus column.  We need to fill in these missing taxonomy names before proceeding so correlation matrices are more informative.  After correcting missing taxonomy, we can proceed to modifying the data to generate matrices of abundances for correlation tests.
+
+```{r get-bacterial-data}
+# Adjust taxonomy
+physeqBacteriaModified <- FillEmptyRanks(physeqBacteria) # 775 x 95
+
+# Melt physeq at various ranks, and remove taxa having < 0.01 abundance
+bacteriaAbundanceDFList <- map(.x = ranks,
+                               .f = ~ physeqBacteriaModified %>%
+                                 tax_glom(.x) %>%
+                                 transform_sample_counts(function(x){x/sum(x)}) %>%
+                                 psmelt() %>% filter(Abundance > 0.01))
+
+# Pivot the abundance tables to make the columns taxa, the rows samples, and the
+#   values abundances
+bacteriaMeltList <- vector(mode = "list", length = length(bacteriaAbundanceDFList))
+
+for (i in 1:length(bacteriaAbundanceDFList)) {
+  
+  currentDF <- bacteriaAbundanceDFList[[i]]
+  currentRank <- names(bacteriaAbundanceDFList)[i]
+  
+  meltedDF <- PivotData(df = currentDF, rank = currentRank)
+  
+  bacteriaMeltList[[i]] <- meltedDF
+  names(bacteriaMeltList)[i] <- currentRank
+}
+```
+
+```{r get-phage-data}
+# Adjust taxonomy
+physeqPhageModified <- FillEmptyRanks(physeqPhage) # 1135 x 84
+
+# Melt, remove taxa that are not in the Phage superkingdom from physeqPhageModified
+phageAbundanceDFList <-  map(.x = ranks,
+                             .f = ~ physeqPhageModified %>% 
+                               tax_glom(.x) %>% 
+                               transform_sample_counts(function(x){x/sum(x)}) %>% 
+                               subset_taxa(Superkingdom == "Phage") %>% 
+                               psmelt() %>% 
+                               filter(Abundance > 0.01))
+
+# Pivot
+phageMeltList <- vector(mode = "list", length = length(phageAbundanceDFList))
+
+for (i in 1:length(phageAbundanceDFList)) {
+  
+  currentDF <- phageAbundanceDFList[[i]]
+  currentRank <- names(phageAbundanceDFList)[i]
+  
+  meltedDF <- PivotData(df = currentDF, rank = currentRank)
+  
+  phageMeltList[[i]] <- meltedDF
+  names(phageMeltList)[i] <- currentRank
+}
+```
+
+Merge melted abundance tables from phage and bacteria together by Sample column.  Also store the names of the phage and bacteria at each taxonomic level so we can organize the heatmaps to avoid redundant rows/columns.
+
+```{r merge-abundance-tables}
+# Merge abundance tables, and store all unique phage and bacteria names for
+#   each merged rank
+mergedAbundanceTables <- vector(mode = "list")
+phageNames <- vector(mode = "list") # for organizing heatmaps
+bacteriaNames <- vector(mode = "list") # for organizing heatmaps
+
+for (i in 1:length(bacteriaMeltList)) {
+  
+  # current bacteria data
+  bacteriaData <- bacteriaMeltList[[i]]
+  bacteriaRank <- names(bacteriaMeltList)[i]
+  bacteriaTaxa <- names(bacteriaData)[names(bacteriaData) != "Sample"]
+    
+  for (j in 1:length(phageMeltList)) {
+    
+    # get index
+    idx <- length(mergedAbundanceTables)
+    
+    # current phage data
+    phageData <- phageMeltList[[j]]
+    phageRank <- names(phageMeltList)[j]
+    phageTaxa <- names(phageData)[names(phageData) != "Sample"]
+    
+    # merge the data, store
+    mergedName <- paste0("b_", bacteriaRank, "-p_", phageRank)
+    mergedData <- merge(bacteriaData, phageData, by = "Sample", all = FALSE) %>%
+      column_to_rownames(var = "Sample")
+    
+    # update index value and store data
+    idx <- idx + 1
+    
+    mergedAbundanceTables[[idx]] <- mergedData
+    names(mergedAbundanceTables)[idx] <- mergedName
+    
+    bacteriaNames[[idx]] <- bacteriaTaxa
+    names(bacteriaNames)[idx] <- mergedName
+    
+    phageNames[[idx]] <- phageTaxa
+    names(phageNames)[idx] <- mergedName
+    
+    print(idx)
+    print(mergedName)
+    
+  }
+}
+```
+
+Run correlations:
+
+```{r correlationMatrices, message=FALSE, warning=FALSE}
+correlationMatrices <- vector(mode = "list", 
+                              length = length(mergedAbundanceTables))
+
+for (i in 1:length(mergedAbundanceTables)) {
+
+  currentComparison <- names(mergedAbundanceTables)[i]
+  currentAbdTable <- mergedAbundanceTables[[i]]
+  
+  # Get the bacteria and phage names for the current comparison
+  allBacteria <- bacteriaNames[[currentComparison]]
+  allPhage <- phageNames[[currentComparison]]
+  
+  # Split currentAbdTable into seroYes and seroNo
+  currentAbdTable <- currentAbdTable %>%
+    rownames_to_column(var = "sample_name")
+  
+  seroYesAbdTable <- currentAbdTable %>% 
+    filter(sample_name %in% seroYesSamples) %>% 
+    column_to_rownames(var = "sample_name")
+  
+  seroNoAbdTable <- currentAbdTable %>% 
+    filter(sample_name %in% seroNoSamples) %>% 
+    column_to_rownames(var = "sample_name")
+
+  abdTableList <- list("seroYes" = seroYesAbdTable, "seroNo" = seroNoAbdTable)
+  
+  correlationMtxList <- map(abdTableList, MakeCorrelationMatrix,
+                            bacteria = allBacteria,
+                            phage = allPhage)
+  
+  # Store correlation matrices in list
+  names(correlationMatrices)[i] <- currentComparison
+  correlationMatrices[[i]] <- correlationMtxList
+}
+```
+
+## Plots of all correlations: 
+
+```{r plot-all-heatmaps}
+# Plot all heatmaps
+for (i in 1:length(correlationMatrices)) {
+  currentComparison <- names(correlationMatrices)[i]
+  correlationMtxList <- correlationMatrices[[i]]
+  
+  #print(currentComparison)
+  #print(names(correlationMtxList))
+  
+  titles <- as.list(paste(currentComparison, names(correlationMtxList)))
+  names(titles) <- names(correlationMtxList)
+  
+  for (j in 1:length(correlationMtxList)) {
+    PlotCorrelationHeatmap(correlationMtx = correlationMtxList[[j]]$correlation_matrix,
+                           title = titles[j])
+  }
+}
+```
+
+## Plots of only significant correlations:
+
+```{r plot-only-sig-heatmaps}
+# Plot only significant correlation heatmaps
+
+for (i in 1:length(correlationMatrices)) {
+
+  currentComparison <- names(correlationMatrices)[i]
+  correlationMtxList <- list("seroYes" = correlationMatrices[[i]]$seroYes$sig_corraltion_matrix,
+                             "seroNo" = correlationMatrices[[i]]$seroNo$sig_corraltion_matrix)
+  
+  titles <- as.list(paste(currentComparison, names(correlationMtxList)))
+  names(titles) <- names(correlationMtxList)
+  
+  for (j in 1:length(correlationMtxList)) {
+
+    isEmpty <- is.na(correlationMtxList[[j]])
+    
+    if (isEmpty == TRUE) {
+      message(paste("No significant correlations for ", titles[j]))
+    } else {
+      numRows <- nrow(correlationMtxList[[j]])
+      numCols <- ncol(correlationMtxList[[j]])
+      tableSize <- numRows*numCols
+      
+      if (tableSize > 1) {
+        
+        PlotCorrelationHeatmap(correlationMtx = correlationMtxList[[j]],
+                               title = titles[j])
+        
+        
+      } else {
+        message(paste("Only one significant correlation value for ", titles[j],
+                      "cannot plot with pheatmap."))
+      }
+    }
+  }
+}
+
+    
+```
+
+

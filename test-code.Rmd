@@ -1,0 +1,36 @@
+---
+title: "Untitled"
+author: "Rachel Rodgers"
+date: "4/9/2021"
+output: html_document
+---
+
+```{r test, eval=FALSE}
+taxTableOld <- as.data.frame(as(tax_table(physeqPhage), "matrix"))
+taxTableOld <- mutate(taxTableOld, across(where(is.factor), as.character))
+
+testDF <- taxTableOld[8:19, ]
+testDFOrig <- testDF
+
+for (i in 1:nrow(testDF)) {
+  
+  lastString <- "unclassified"
+  
+  for (j in 1:ncol(testDF)) {
+    
+    if (!is.na(testDF[i, j]) & testDF[i, j] != "not classified") { # column value is not NA or "not classified"
+      lastString <- testDF[i, j]
+    } else if (is.na(testDF[i, j]) & j == 1) { # column value is NA and it's column 1
+      testDF[i, j] <- lastString
+    } else if (is.na(testDF[i, j]) & j > 1) { # column value is NA and it's column 2+
+      testDF[i, j] <- paste("unclassified", lastString)
+    } else if (testDF[i, j] == "not classified") { # column value is equal to "not classified"
+      if (lastString == "not classified") {
+        testDF[i, j] <- "unclassified"
+      } else {
+        testDF[i, j] <- paste(lastString)
+      }
+    }
+  }
+}
+```
