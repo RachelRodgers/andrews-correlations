@@ -86,15 +86,21 @@ PivotData <- function(df, rank) {
 }
 
 MakeCorrelationMatrix <- function(abdTable, bacteria, phage, sig_p = 0.05) {
-  # Generate a correlation matrix from an abundance data frame
+  # Generate a correlation matrix, significant correlation matrix and matrix
+  #   of correlation p-values from an abundance data frame. Returns a list obj.
   #
   # Args:
   #   abdTable - data frame of abundance information (sample names are row names,
-  #   columns are taxa)
+  #   column names are taxa)
   #   bacteria - vector of all bacteria names in current abd table
   #   phage - vector of phage names in current abd table
+  #   sig_p - significance value for correlations
   # Returns:
-  #   correlation matrix
+  #   correlationList$correlation_matrix - correlation matrix containing all 
+  #       correlations regardless of significance
+  #   correlationList$sig_correlation_matric - correlation matrix containing
+  #       only the significant correlations
+  #   correlationList$correlationPValues - matrix of p-values for all correlations
   emptyCols <- colnames(abdTable)[colSums(abdTable) == 0]
   keepBacteria <- bacteria[!bacteria %in% emptyCols]
   keepPhage <- phage[!phage %in% emptyCols]
@@ -118,6 +124,7 @@ MakeCorrelationMatrix <- function(abdTable, bacteria, phage, sig_p = 0.05) {
     filter(row_taxa %in% keepBacteria) %>% # only bacteria will be in the rows
     dplyr::select(row_taxa, all_of(keepPhage)) # only phage will be in the columns
     
+  corrPValMtx <- column_to_rownames(corrPValReduced, var = "row_taxa")
   # pivot the correlations and p-values into a long data frame, use to generate
   #   significant correlation matrix
   corrPivot <- corrReduced %>% 
@@ -152,7 +159,8 @@ MakeCorrelationMatrix <- function(abdTable, bacteria, phage, sig_p = 0.05) {
     #dplyr::select(row_taxa, all_of(keepPhage)) # only phage will be in the columns
   
   correlationList <- list("correlation_matrix" = corrMtx,
-                          "sig_corraltion_matrix" = sigCorrMtx)
+                          "sig_corraltion_matrix" = sigCorrMtx,
+                          "correlation_p_values" = corrPValMtx)
   
 }
 
@@ -173,13 +181,13 @@ PlotCorrelationHeatmap <- function(correlationMtx,  title = NULL) {
 Loading bacterial and phage phyloseq objects.  Changing taxonomic categories for phage from lower to upper-case for ease.
 
 ```{r load-data, results='hide'}
-physeqBacteria <- readRDS("psm.DS1.RDS")
+physeqBacteria <- readRDS("psm.DS3.RDS")
 sampleDataBacteria <- as(sample_data(physeqBacteria), "data.frame")
-physeqBacteria # 775 x 95
+physeqBacteria 
 
-physeqPhage <- readRDS("psm.DS1.phage.RDS") # currently contains phage + other stuff
+physeqPhage <- readRDS("psm.DS3.phage.RDS") # currently contains phage + other stuff
 sampleDataPhage <- as(sample_data(physeqPhage), "data.frame")
-physeqPhage # 1135 x 84
+physeqPhage
 
 # Adjust the capitalization of the phage taxonomy table for ease (currently lower case)
 phageRanksOld <- colnames(tax_table(physeqPhage))
@@ -214,8 +222,8 @@ phageSeroNo <- phageSero %>%
   pull(sample_name)
 
 # merge the samples from phage and bacteria
-seroYesSamples <- unique(c(bacteriaSeroYes, phageSeroYes)) # 37 samples
-seroNoSamples <- unique(c(bacteriaSeroNo, phageSeroNo)) # 63 samples
+seroYesSamples <- unique(c(bacteriaSeroYes, phageSeroYes))
+seroNoSamples <- unique(c(bacteriaSeroNo, phageSeroNo))
 ```
 
 Phyloseq objects will be glommed at all taxonomic ranks.  Checking the number of missing taxonomic ranks (NA's) in these columns so uninformative names in the taxonomy table can be replaced.
@@ -226,18 +234,18 @@ names(ranks) <- ranks
 
 taxTableBacteria <- as.data.frame(as(tax_table(physeqBacteria), "matrix"))
 numMissingBacterialRanks <- map_int(taxTableBacteria, ~ sum(is.na(.)))
-numMissingBacterialRanks[ranks] # 139 NAs in Genus column
+numMissingBacterialRanks[ranks] 
 
 taxTablePhage <- as.data.frame(as(tax_table(physeqPhage), "matrix"))
 numMissingPhageRanks <- map_int(taxTablePhage, ~ sum(is.na(.)))
-numMissingPhageRanks[ranks] # 19 NAs in Order, 12 NAs in Family, 29 NAs in Genus
+numMissingPhageRanks[ranks] 
 ```
 
-The bacterial data has 139 NA's in the Genus column.  The phage data has 19 NA's in Order, 12 NA's in Family, and 29 NA's in the Genus column.  We need to fill in these missing taxonomy names before proceeding so correlation matrices are more informative.  After correcting missing taxonomy, we can proceed to modifying the data to generate matrices of abundances for correlation tests.
+We need to fill in these missing taxonomy names before proceeding so correlation matrices are more informative.  After correcting missing taxonomy, we can proceed to modifying the data to generate matrices of abundances for correlation tests.
 
 ```{r get-bacterial-data}
 # Adjust taxonomy
-physeqBacteriaModified <- FillEmptyRanks(physeqBacteria) # 775 x 95
+physeqBacteriaModified <- FillEmptyRanks(physeqBacteria) 
 
 # Melt physeq at various ranks, and remove taxa having < 0.01 abundance
 bacteriaAbundanceDFList <- map(.x = ranks,
@@ -264,7 +272,7 @@ for (i in 1:length(bacteriaAbundanceDFList)) {
 
 ```{r get-phage-data}
 # Adjust taxonomy
-physeqPhageModified <- FillEmptyRanks(physeqPhage) # 1135 x 84
+physeqPhageModified <- FillEmptyRanks(physeqPhage) 
 
 # Melt, remove taxa that are not in the Phage superkingdom from physeqPhageModified
 phageAbundanceDFList <-  map(.x = ranks,
@@ -379,6 +387,43 @@ for (i in 1:length(mergedAbundanceTables)) {
 }
 ```
 
+```{r save-corrMtx-and-correlationPValues, eval=FALSE}
+outPath <- "./output_DS3"
+dir.create(outPath)
+
+for (i in 1:length(correlationMatrices)) {
+
+  comparison <- names(correlationMatrices)[i]
+  correlationMtxList <- correlationMatrices[[i]]
+  
+  # correlation matrices
+  titlesCorrMtx <- as.list(paste(comparison, names(correlationMtxList),
+                                 "Correlation_Matrix.txt", sep = "_"))
+  
+  correlations <- list(correlationMtxList$seroYes$correlation_matrix,
+                       correlationMtxList$seroNo$correlation_matrix)
+  names(correlations) <- titlesCorrMtx
+  correlationSavePaths <- paste0(outPath, names(correlations))
+  walk2(.x = correlations, .y = correlationSavePaths,
+        .f = ~ write.table(x = .x, file = .y, quote = FALSE, sep = "\t",
+                           row.names = TRUE, col.names = TRUE))
+  
+  # p-value matrices
+  titlesPVal <- as.list(paste(comparison, names(correlationMtxList),
+                              "Correlation_P-Values.txt", sep = "_"))
+  pValues <- list(correlationMtxList$seroYes$correlation_p_values,
+                  correlationMtxList$seroNo$correlation_p_values)
+  names(pValues) <- titlesPVal
+  pvalueSavePaths <- paste0(outPath, names(pValues))
+  walk2(.x = pValues, .y = pvalueSavePaths,
+        .f = ~ write.table(x = .x, file = .y, quote = FALSE, sep = "\t",
+                           row.names = TRUE, col.names = TRUE))
+  
+  
+}
+
+```
+
 ## Plots of all correlations: 
 
 ```{r plot-all-heatmaps}
@@ -441,5 +486,3 @@ for (i in 1:length(correlationMatrices)) {
 
     
 ```
-
-

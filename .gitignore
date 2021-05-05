@@ -1,3 +1,11 @@
+# Data Files
+*.RDS
+
+# Output Directories
+output_DS1
+output_DS2
+output_DS3
+
 # History files
 .Rhistory
 .Rapp.history
